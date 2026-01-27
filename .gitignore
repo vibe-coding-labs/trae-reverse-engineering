@@ -65,3 +65,20 @@ Trae.app/
 *.obj
 *.o
 *.wasm
+
+# 大型二进制文件和可执行文件
+ai-agent/ai-agent
+cli.js/cli.js
+main.js/main.js
+
+# 构建和输出目录
+build/
+tmp/
+.nyc_output/
+coverage/
+
+# IDE特定文件
+.vs/
+*.sublime-project
+*.sublime-workspace
+*.settings/
