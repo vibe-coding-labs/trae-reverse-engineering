@@ -82,3 +82,21 @@ coverage/
 *.sublime-project
 *.sublime-workspace
 *.settings/
+
+# 下载的安装包和提取的数据 (超出GitHub大小限制)
+data/ide/**/*.dmg
+data/ide/**/*.exe
+data/ide/**/*.deb
+data/ide/**/*.rpm
+data/ide/**/*.tar.gz
+data/ide/**/extracted/
+data/solo/**/*.dmg
+data/solo/**/*.exe
+data/solo/**/extracted/
+data/mobile/**/*.apk
+data/mobile/extracted/
+data/**/ai-agent-strings.txt
+data/**/ai-agent-symbols.txt
+*.img
+Trae-decompressed.dmg
+trae-hfs-partition.img
