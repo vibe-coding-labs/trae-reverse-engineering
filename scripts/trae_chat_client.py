@@ -46,21 +46,35 @@ import requests
 # === 常量 ====================================================================
 
 CLIENT_ID = "6eefa01c-1036-4c7e-9ca5-d891f63bfcd8"
+AUTH_CLIENT_ID = "ono9krqynydwx5"  # Trae stable client_id from product.json
 # 已知的 API 端点（BootConfig 可能不可达，用已知值硬编码）
 TOKEN_HOSTS = {
     "us": "https://token.trae.ai",
     "cn": "https://token.trae.com.cn",
+    "sg": "https://api-sg-central.trae.ai",
+}
+AUTH_CLIENT_IDS = {
+    "trae": "ono9krqynydwx5",
+    "solo": "en1oxy7wnw8j9n",
 }
 API_ENDPOINTS = {
     "us": {
         "chat": "https://icube-normal.trae.ai",
+        "auth": "https://icube-normal.trae.ai",
         "model": "https://mcs-boot.trae.ai",
         "core": "https://core-normal.trae.ai",
     },
     "cn": {
         "chat": "https://icube-normal.trae.com.cn",
+        "auth": "https://icube-normal.trae.com.cn",
         "model": "https://mcs-boot.trae.com.cn",
         "core": "https://core-normal.trae.com.cn",
+    },
+    "sg": {
+        "chat": "https://coresg-normal.trae.ai",
+        "auth": "https://api-sg-central.trae.ai",
+        "model": "https://coresg-normal.trae.ai",
+        "core": "https://coresg-normal.trae.ai",
     },
 }
 TOKEN_STORE_PATH = os.path.expanduser("~/.trae/tokens.json")
