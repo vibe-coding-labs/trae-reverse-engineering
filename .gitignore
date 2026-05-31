@@ -100,3 +100,4 @@ data/**/ai-agent-symbols.txt
 *.img
 Trae-decompressed.dmg
 trae-hfs-partition.img
+__pycache__/

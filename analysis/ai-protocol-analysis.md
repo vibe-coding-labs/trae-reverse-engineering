@@ -502,6 +502,238 @@ async function refreshToken() {
 }
 ```
 
+### 3.5 BootConfig 完整认证流程
+
+**Boot 端点:**
+```
+https://icube-boot.trae.ai          — 国际区
+https://icube-boot.trae.com.cn       — 中国区
+```
+
+**BootConfig 获取流程:**
+1. IDE 启动 → GET https://icube-boot.trae.ai/boot/config
+2. 返回 BootConfig（17 字段，包含 tokenHost、userInfo）
+3. 如果 userInfo 未过期 → 直接使用已有 token
+4. 如果已过期 → 用 refresh_token 通过 tokenHost 刷新
+
+**tokenHost 发现:**
+```json
+{
+  "tokenHost": "https://token.trae.ai",
+  "token_host": "https://token.trae.com.cn",
+  "userInfo": {
+    "expired_at": 1700000000,
+    "refresh_expired_at": 1700000000,
+    "user_id": "user_uuid",
+    "token_release_at": 1699000000,
+    "token_host": "https://token.trae.ai"
+  }
+}
+```
+
+### 3.6 Token 刷新完整 API
+
+**端点:** `POST ${tokenHost}/cloudide/api/v3/trae/ExchangeToken`
+
+**请求头:**
+```
+Authorization: Bearer <refresh_token>
+Content-Type: application/json
+x-cloudide-token: <cloudide_token>
+x-ide-token: <ide_token>
+x-frontier-id: <frontier_id>
+```
+
+**请求体:**
+```json
+{
+  "client_id": "6eefa01c-1036-4c7e-9ca5-d891f63bfcd8",
+  "grant_type": "refresh_token",
+  "refresh_token": "<current_refresh_token>"
+}
+```
+
+**响应:**
+```json
+{
+  "access_token": "new_access_token",
+  "refresh_token": "new_refresh_token",
+  "expires_in": 3600,
+  "token_type": "Bearer",
+  "scope": "marscode"
+}
+```
+
+### 3.7 错误码
+
+| 错误码 | 含义 | 处理方式 |
+|--------|------|---------|
+| 20324 | Token 格式错误 | 重新登录 |
+| 20101 | Token 已过期 | 尝试刷新 |
+| 20315 | Token 已吊销 | 重新登录 |
+| 20125 | Refresh Token 无效 | 重新登录 |
+| 20126 | Refresh Token 已过期 | 重新登录 |
+
+### 3.8 OAuth2 PKCE 流程
+
+**端点:**
+```
+授权: https://{tokenHost}/oauth/authorize
+令牌: https://{tokenHost}/oauth/token
+```
+
+**OAuth2 Scopes（从 main.js 提取）:**
+| Scope | 用途 | 适用地区 |
+|-------|------|---------|
+| `marscode` | 通用国际版 Trae/MarsCode | 国际 |
+| `marscode_cn` | 中国区 MarsCode | 中国 |
+| `marscode_com` | MarsCode 国际站 | 国际 |
+| `bytedance` | ByteDance 内部 | 内部 |
+| `saas` | SaaS 企业版 | 企业 |
+
+**Client Identifiers（从 binary 提取）:**
+```
+client_id:     6eefa01c-1036-4c7e-9ca5-d891f63bfcd8
+client_secret: 850edec7-b9d0-48aa-99b5-67c888e282cd
+```
+
+**PKCE 完整流程:**
+1. 生成 code_verifier（43-128 字符随机字符串）
+2. 生成 code_challenge = base64url(sha256(code_verifier))
+3. 构造授权 URL → 用户浏览器打开 → 用户登录
+4. 重定向回本地服务器，获取 authorization_code
+5. POST 授权码 + code_verifier → 换 access_token + refresh_token
+6. 存储 token（SQLCipher 加密数据库）
+
+**授权请求:**
+```
+GET {tokenHost}/oauth/authorize?
+  response_type=code&
+  client_id=6eefa01c-1036-4c7e-9ca5-d891f63bfcd8&
+  redirect_uri=http://localhost:{port}/callback&
+  code_challenge={base64url(sha256(verifier))}&
+  code_challenge_method=S256&
+  scope=marscode
+```
+
+**令牌交换:**
+```
+POST {tokenHost}/oauth/token
+Content-Type: application/json
+
+{
+  "grant_type": "authorization_code",
+  "code": "{authorization_code}",
+  "redirect_uri": "http://localhost:{port}/callback",
+  "client_id": "6eefa01c-1036-4c7e-9ca5-d891f63bfcd8",
+  "code_verifier": "{original_code_verifier}"
+}
+```
+
+### 3.9 OAuth2 Provider 端点
+
+| Provider | 授权端点 | 令牌端点 |
+|----------|---------|---------|
+| Google | Google OAuth2 | Google Token |
+| GitHub | GitHub OAuth2 | GitHub Token |
+| GitLab | GitLab OAuth2 | GitLab Token |
+| Supabase | https://api.supabase.com/v1/oauth/authorize | https://api.supabase.com/v1/oauth/token |
+
+### 3.10 第三方 Token 获取
+
+**端点:** `POST /cloudide/api/v3/trae/GetThirdPartyToken`
+
+通过已获取的 JWT token 换取第三方服务的访问令牌：
+```
+POST {tokenHost}/cloudide/api/v3/trae/GetThirdPartyToken
+x-cloudide-token: {access_token}
+```
+
+### 3.11 AWS SSO 企业认证
+
+**端点:**
+```
+SSO OIDC:  https://oidc.{region}.amazonaws.com
+SSO:        https://portal.sso.{region}.amazonaws.com
+STS:        https://sts.{region}.amazonaws.com
+Bedrock:    https://bedrock-runtime.{region}.amazonaws.com
+```
+
+**完整流程（3 步链）:**
+
+**Step 1: SSO OIDC CreateToken**
+```
+POST https://oidc.{region}.amazonaws.com/token
+Content-Type: application/json
+
+{
+  "clientId": "{sso_client_id}",
+  "clientSecret": "{sso_client_secret}",
+  "grantType": "urn:ietf:params:oauth:grant-type:device_code",
+  "deviceCode": "{device_code}",
+  "codeVerifier": "{code_verifier}"
+}
+```
+
+**Step 2: SSO GetRoleCredentials**
+```
+POST https://portal.sso.{region}.amazonaws.com/federation/credentials
+Authorization: Bearer {access_token}
+
+{
+  "accountId": "{aws_account_id}",
+  "roleName": "{sso_role_name}"
+}
+```
+
+**Step 3: STS AssumeRole（可选，用于跨账号访问）**
+```
+POST https://sts.{region}.amazonaws.com/
+Action=AssumeRole
+RoleArn=arn:aws:iam::{account}:role/{role}
+RoleSessionName=trae-session
+```
+
+**错误类型:**
+```rust
+// AWS SSO OIDC 错误
+BadExpirationTimeFromSsoOidc
+ExpiredToken
+
+// AWS 凭证错误
+CredentialsNotLoaded
+ProviderTimedOut
+InvalidConfiguration
+ProviderError
+TokenNotLoaded
+
+// IMDS（实例元数据服务）
+ImdsCommunicationError
+FailedToLoadToken
+```
+
+### 3.12 Supabase OAuth 认证
+
+**端点:**
+```
+授权: https://api.supabase.com/v1/oauth/authorize
+令牌: https://api.supabase.com/v1/oauth/token
+```
+
+**工具集成（Trae AI Agent 内）:**
+```
+toolcall_supabase_get_project    — 获取 Supabase 项目信息
+toolcall_supabase_get_tables     — 列出表
+toolcall_supabase_apply_migration — 应用迁移
+```
+
+**Supabase OAuth 流程:**
+1. 浏览器打开 Supabase 授权 URL
+2. 用户登录 Supabase 账号
+3. 获取授权码
+4. 换 Supabase API token
+5. token 用于 Supabase 工具调用
+
 ---
 
 ## 4. Hub Bridge Service
@@ -10168,6 +10400,1755 @@ struct DeployToRemoteParams {
 struct BrowserWaitingForUserInteractionParams {
     // 2 elements - browser waiting params
 }
+```
+
+---
+
+## 149. LLM Provider Protocol
+
+### 149.1 Provider & Model Configuration
+
+**Source:** `apps/icube_server_rs/modules/ai-agent/src/infrastructure/adapter/llm/dto.rs` and `llm-client` crate
+
+The LLM Provider Protocol abstracts multiple AI backends behind a unified interface. Trae supports Anthropic, OpenAI, AWS Bedrock, Google Gemini, DeepSeek, OpenRouter, xAI, and custom model endpoints. This layer handles request/response serialization, token counting, tool call normalization, and streaming across heterogeneous APIs.
+
+**Context:** Provider abstraction allows Trae to switch between model vendors transparently. The `LLMClientRequestRaw` struct normalizes diverse API formats into a single internal representation. Each provider has its own response parser that maps back to unified event types.
+
+```rust
+struct LLMClientRequestRaw {
+    // 12 elements - model, messages, max_tokens, tools, usage, thinking, reasoning, inferenceConfig, anthropic_version
+    // Key fields: model, messages(max_tokens|max_completion_tokens), tools, usage, thinking, reasoning(inferenceConfig|effort)
+    // Contains: LLMClientThinkingRaw, LLMClientReasoningRaw, LLMClientCacheControl
+}
+
+struct LLMClientMessage {
+    // 6 elements - role, content, name, tool_call_id, tool_calls, reasoning_content
+}
+
+struct LLMClientToolcallItem {
+    // 4 elements - id, type, function, index
+}
+
+struct LLMClientFunctionCall {
+    // 2 elements - name, arguments
+}
+
+struct LLMClientMessageExtraInfo {
+    // 3 elements
+}
+
+struct LLMClientToolCall {
+    // 5 elements - id, type, function, index, delta
+}
+
+struct LLMClientToolCallFunction {
+    // 2 elements - name, arguments
+}
+
+struct NativeAnthropicUsage {
+    // 4 elements - input_tokens, output_tokens, cache_creation_input_tokens, cache_read_input_tokens
+}
+
+struct NativeLLMUsage {
+    // 3 elements - prompt_tokens, completion_tokens, total_tokens
+}
+
+struct NativeOpenRouterLLMUsage {
+    // 3 elements - prompt_tokens, completion_tokens, total_tokens
+}
+
+struct Provider {
+    // 10 elements
+}
+
+struct ProvidersListResponse {
+    // 1 element - provider list
+}
+
+struct ModelConfigInfo {
+    // 12 elements
+}
+
+struct ModelDetailInfo {
+    // 17 elements - basic model metadata including provider, capabilities
+}
+
+struct ModelPromptConfig {
+    // 3 elements
+}
+
+struct ModelCustomConfig {
+    // 11 elements
+}
+
+struct CustomModelTypeInfo {
+    // 5 elements
+}
+
+struct ModelDetail {
+    // 2 elements
+}
+
+struct ModelCommonResponse {
+    // 3 elements
+}
+
+struct ModelConfigMeta {
+    // 9 elements
+}
+
+struct ModelEcryptedPrompt {
+    // 4 elements - encrypted prompt configuration
+}
+
+struct ModelSelectionModeConfig {
+    // 8 elements - model selection strategy configuration
+}
+
+struct ModelDetailConfig {
+    // 12 elements
+}
+
+struct DynamicAgenticAutoModelConfig {
+    // 1 element
+}
+
+struct DynamicAgenticAutoModelConfigFallbackItem {
+    // 4 elements - min_score, max_score
+}
+
+struct ModelCallChainItem {
+    // 4 elements
+}
+
+struct LLMCustomModelRawMessageResponse {
+    // 1 element
+}
+```
+
+### 149.2 OpenAI Format Compatibility
+
+Trae uses the OpenAI-compatible chat completions format for several providers, while also supporting native Anthropic and AWS Bedrock formats.
+
+**Source:** `llm-client` crate provider modules
+
+```rust
+struct OpenAIRequest {
+    // Standard OpenAI-compatible request: model, messages, max_tokens, tools, tool_choice, stream
+}
+
+struct OpenAITool {
+    // function definition with name, description, parameters
+}
+
+struct OpenAIFunction {
+    // function schema
+}
+
+struct OpenAIMessage {
+    // role, content, tool_calls, tool_call_id
+}
+
+struct OpenAIToolCall {
+    // 3 elements - id, type, function
+}
+
+struct OpenAIFunctionCall {
+    // name, arguments
+}
+
+struct OpenAIStreamChunk {
+    // streaming response chunks
+}
+
+struct OpenAIStreamChoice {
+    // delta, finish_reason, index
+}
+
+struct OpenAIStreamDelta {
+    // role, content, tool_calls
+}
+
+struct OpenAIStreamToolCall {
+    // id, type, function, index
+}
+
+struct OpenAIStreamFunction {
+    // name, arguments
+}
+
+struct OpenAIContentPart {
+    // text or image_url content parts
+}
+
+struct OpenAIImageUrl {
+    // url and detail
+}
+```
+
+### 149.3 AWS Bedrock Integration
+
+**Source:** `aws_sdk_bedrockruntime` and custom-model-proxy-client
+
+Trae uses AWS Bedrock Converse Stream API for AWS-based model inference. AWS SSO/OIDC authentication is used for enterprise accounts.
+
+```rust
+// AWS Bedrock Converse Stream types
+// Content types: text, tool_use, tool_result, content_filtered, guardrail_intervened
+// Stop reasons: end_turn, tool_use, stop_sequence, content_filtered
+
+struct AWSClientMessageContentBlockText {
+    // text content block
+}
+
+struct AWSClientMessageContentBlockImage {
+    // image content with source
+}
+
+struct AWSClientMessageImageBlock {
+    // format, source
+}
+
+struct AWSClientMessageImageSource {
+    // s3_location or bytes
+}
+
+struct AWSClientMessageImageS3Location {
+    // uri, bucket_owner
+}
+
+struct AWSInferenceConfiguration {
+    // max_tokens, temperature, top_p
+}
+
+// AWS SDK error types handled:
+// ConverseStreamOutputError, ConverseStreamError
+// InternalServerException, ModelStreamErrorException
+// ValidationException, ThrottlingException
+```
+
+### 149.4 Google Gemini Integration
+
+**Source:** `llm-client/src/provider/gemini.rs`
+
+Trae supports Google Gemini 3, Gemini 3.1, and Gemini 3 Flash models. Uses the native Gemini API format with function calling and thinking/thought signatures.
+
+```rust
+struct LLMClientToolCallExtraContentGoogle {
+    // thought_signature - Gemini-specific thought/thinking metadata
+}
+```
+
+### 149.5 Custom Model Proxy
+
+**Source:** `custom-model-proxy-client` crate
+
+```rust
+struct LLMCustomModelRawMessageResponse {
+    // 1 element - raw response wrapper
+}
+
+struct GetCustomModelTypeConfigRequest {
+    // 1 element
+}
+
+struct GetCustomModelTypeConfigResponse {
+    // 1 element - model type info list
+}
+
+struct PersistCustomModelMeta {
+    // 1 element
+}
+
+struct CustomModel {
+    // 29 elements - full custom model definition
+    // Includes: model_id, model_name, provider, base_url, api_key reference,
+    // capabilities, rate limits, display_name, etc.
+}
+```
+
+### 149.6 Model Endpoints
+
+Trae routes to different providers via URL patterns:
+
+```text
+Endpoint patterns discovered:
+- Anthropic: /v1/messages (native anthropic versioned format)
+- OpenAI compatible: /v1/chat/completions
+- DeepSeek: /models/chat/completions, /v1/models (model list)
+- OpenRouter: /v1/chat/completions (with provider routing)
+- AWS Bedrock: https://bedrock-runtime.{region}.amazonaws.com/model/{modelId}/invoke-with-response-stream
+- AWS: https://bedrock.{region}.amazonaws.com (management plane)
+- xAI: OpenAI-compatible format
+```
+
+---
+
+## 150. AI Agent Event Protocol
+
+### 150.1 LLM Stream Events
+
+**Source:** `apps/icube_server_rs/modules/ai-agent/src/infrastructure/adapter/llm/event.rs`
+
+The AI Agent emits structured events during LLM interaction. These represent the full lifecycle of a streaming AI response — from queue wait through token generation to completion, including tool calls, errors, and usage metrics. Events are serialized and sent over SSE or WebSocket to the IDE.
+
+**Context:** Each chat turn generates a sequence of events: QueueBegin → (Metadata) → (Timing) → ToolCall/Output → Error/Done → FeeUsage. The IDE uses these events to render streaming responses, update UI, and track billing.
+
+```rust
+struct MetadataEvent {
+    // 5 elements - request metadata: model, provider, timestamps
+}
+
+struct OutputEvent {
+    // streaming text output with index
+}
+
+struct OutputEventToolCall {
+    // 4 elements - tool call within output stream
+}
+
+struct OutputEventFunctionCall {
+    // 2 elements - function call within output stream
+}
+
+struct ExtraInfoEvent {
+    // 6 elements - supplementary info
+}
+
+struct SuggestedQuestion {
+    // 1 element
+}
+
+struct SuggestedQuestionsEvent {
+    // 1 element - list of suggested questions
+}
+
+struct TokenUsageEvent {
+    // 9 elements - token usage breakdown
+}
+
+struct ErrorEvent {
+    // 4 elements - error code, message, type, stack
+}
+
+struct DoneEvent {
+    // 1 element - completion signal
+}
+
+struct QueueBeginEvent {
+    // 4 elements - queue position, timestamp, estimated wait
+}
+
+struct QueueEndEvent {
+    // 3 elements - queue end info
+}
+
+struct QueueContinueEvent {
+    // 1 element - queue continuation
+}
+
+struct RequestWaitInQueueEvent {
+    // 9 elements - full queue wait metadata
+}
+
+struct FeeUsageEvent {
+    // 8 elements - billing/fee information
+}
+
+struct NotifyUsageEvent {
+    // 5 elements - notify_type, remain_usage, button
+}
+
+struct TimingCostEvent {
+    // full timing breakdown: preprocess, first_token, provider_latency, postprocess
+}
+
+struct ModelCallChainItem {
+    // 4 elements - model call chain trace
+    // Fields: error_stage
+}
+```
+
+### 150.2 Tool Call Events
+
+**Source:** `apps/icube_server_rs/modules/ai-agent/src/infrastructure/adapter/llm/event.rs`
+
+```rust
+struct ToolCallEvent {
+    // 11 elements - tool_call_id, tool_name, input, status, timing, result
+    // Fields: first_data, require_local_execution
+}
+
+struct ToolCallCancelEvent {
+    // cancellation metadata
+}
+
+struct TaskCreatedEvent {
+    // 2 elements - task_id, parent_id
+}
+```
+
+### 150.3 Agent Lifecycle Events
+
+**Source:** `apps/icube_server_rs/modules/ai-agent/src/infrastructure/adapter/llm/event.rs`
+
+```rust
+struct ThoughtEvent {
+    // 8 elements - agent reasoning steps, thoughts, observations
+}
+
+struct TurnCompletionEvent {
+    // 6 elements - turn summary
+}
+
+struct MissingHistoryEvent {
+    // 1 element - indicates history gap
+}
+
+struct RequiredContextEvent {
+    // 1 element - missing context marker
+}
+
+struct HistoryEvent {
+    // 6 elements - history_data
+}
+
+struct SubAgentCreateEvent {
+    // 6 elements - sub_agent metadata, parent info
+}
+
+struct AgentIdleEvent {
+    // 6 elements - check_interval_ms
+}
+
+struct AgentStatusItem {
+    // 3 elements
+}
+
+struct AgentStatusEvent {
+    // 1 element - list of agent status items
+}
+
+struct AgentWakeupEvent {
+    // 3 elements - resource_id, resource_type
+}
+
+struct AgentResumeEvent {
+    // 6 elements - resume_agent_run_id
+}
+```
+
+### 150.4 Context & Summary Events
+
+**Source:** `apps/icube_server_rs/modules/ai-agent/src/infrastructure/adapter/llm/event.rs`
+
+```rust
+struct GenerateSummaryEvent {
+    // 2 elements
+}
+
+struct CompactEvent {
+    // 8 elements - compact_id
+}
+
+struct CompactFinishEvent {
+    // 6 elements
+}
+
+struct ObtainContextEvent {
+    // 2 elements - contexts, context_params
+}
+
+struct RevokeEvent {
+    // 1 element
+}
+
+struct CloudContextUsageItem {
+    // 4 elements
+}
+
+struct CloudContextUsageEvent {
+    // cloud context usage summary
+}
+
+struct ChatMemoryTriggerEvent {
+    // 2 elements - chat_memory_scene, force_update
+}
+```
+
+### 150.5 Filter & Cache Events
+
+**Source:** `apps/icube_server_rs/modules/ai-agent/src/infrastructure/adapter/llm/event.rs`
+
+```rust
+struct ContentFilterEvent {
+    // 4 elements - filter type, reason, content, action
+}
+
+struct ToolCacheDataEvent {
+    // 2 elements - groups
+}
+
+struct ToolCacheGroup {
+    // 3 elements - group_name
+}
+
+struct ToolCacheItem {
+    // 3 elements
+}
+
+struct ModelConfigEvent {
+    // model configuration update event
+}
+
+struct LLMContentFilterWarningEvent {
+    // 4 elements - hit_rule_id, hit_rule_name, execute_point
+}
+```
+
+### 150.6 Platform Timing Details
+
+**Source:** `apps/icube_server_rs/modules/ai-agent/src/infrastructure/adapter/llm/event.rs`
+
+```rust
+struct ServerPreprocessingDetail {
+    // check_risk, build_llm_prompt
+}
+
+struct ServerPostprocessingDetail {
+    // post_security_check
+}
+
+struct PlatformTimingDetail {
+    // middleware_processing_time, queue_timing, postprocess_timing
+    // Includes: preprocessing_detail, agent_preprocess_timing,
+    // agent_postprocess_timing, agent_middleware_timing,
+    // gateway_preprocess_timing, gateway_server_processing_time,
+    // platform_detail, post_processing_detail,
+    // platform_first_token_timing, server_processing_time,
+    // first_sse_event_time, is_retry,
+    // account_type, account_name, provider_model_name
+}
+```
+
+### 150.7 SSE Event Types
+
+The SSE stream uses the following named events to communicate AI progress to the client:
+
+```text
+SSE Event Names:
+  sse.open      - Stream opened
+  sse.delta     - Content delta (text or partially streamed tool calls)
+  sse.end       - Stream complete (includes final usage data)
+  sse.error     - Error occurred during streaming
+  sse.cancel    - User or system cancelled the stream
+  sse.heartbeat - Keepalive to detect stale connections
+  sse.retry     - Retry notification after transient failure
+
+Server-Side Processing Phases (TimingTrack for latency analysis):
+  rs_01_chat_begin              - Request received
+  rs_02_get_session             - Session lookup
+  rs_03_get_history_messages    - History loading
+  rs_04_create_message          - Message DB record created
+  rs_05_create_snapshot         - Pre-chat snapshot taken
+  rs_06_resolve_*               - Context resolution (model, diagnostics, editor, terminal, rules, lint, web search, browser selection, file diffs, slash commands)
+  rs_07_create_task             - AI task created
+  rs_08_create_turn             - Conversation turn opened
+  rs_09_process_task            - Task processing begins
+  rs_10_prepare_guideline_context - Guidelines loaded
+  rs_11_ckg_retrieve_*          - CKG retrieval and indexing
+  rs_12_list_*_tools            - Available tools enumerated
+  rs_13_render_user_prompt      - Prompt rendered
+  rs_16_llm_generate_plain_item - LLM inference called
+  rs_18_llm_response_first_token - First token received from LLM
+  rs_19_llm_response_done       - LLM response complete
+  svr_01_queue_timing           - Queue wait time
+  svr_02_preprocess_timing      - Preprocessing time
+  svr_04_postprocess_timing     - Postprocessing time
+  svr_10_first_sse_event_timing - Time to first SSE event
+```
+
+---
+
+## 151. Hub Bridge Session Protocol
+
+### 151.1 Remote Session Data
+
+**Source:** `apps/icube_server_rs/modules/ai-agent/src/domain/lite/typing.rs` and `handoff` module
+
+The Hub Bridge synchronizes session state between the local IDE and remote cloud servers. This enables seamless handoff between devices and cloud-based AI processing. Sessions carry metadata about project context, VM sandboxes, and version control state.
+
+**Context:** Sessions are created locally and synced to the Hub via the Frontier WebSocket protocol. Remote sessions mirror local state with additional cloud-specific fields (sandbox allocation, snapshot URLs, handoff tokens). The Hub Bridge also handles CLI-to-IDE session forwarding.
+
+```rust
+struct RemoteChatSessionData {
+    // 23 elements - session_id, conversation_id, project_id, VM info,
+    // sandbox allocation (RemoteSandboxInfo), history file URLs, handoff targets, timestamps
+    // Includes: version_snapshot (VersionSnapshotInfo), pre_termination, handoff (HandoffInfo), auto_create_project
+}
+
+struct RemoteChatMessageData {
+    // 38 elements - message_id, session_id, role, content, model,
+    // tool_calls, attachments, timestamps, revert info
+    // Includes: unrevertible_reason
+}
+```
+
+### 151.2 Session Lifecycle Management
+
+**Source:** Session handler modules
+
+```rust
+struct CreateChatSessionRequest {
+    // 10 elements - main_folder, environment_id, initial_message, project_extra_info
+}
+
+struct CreateChatSessionData {
+    // 5 elements - project_extra_info, auto_create_project, create_reason
+}
+
+struct CreateChatSessionResponse {
+    // 4 elements - session_id, conversation_id, created
+}
+
+struct RemoteGetChatSessionResponse {
+    // 3 elements
+}
+
+struct CommitSessionResponse {
+    // 2 elements - history_file_uri, version_snapshot
+}
+
+struct FreezeChatSessionResponse {
+    // 2 elements
+}
+
+struct ThawChatSessionData {
+    // 1 element
+}
+
+struct ThawChatSessionResponse {
+    // 3 elements - restored_status
+}
+
+struct GetHistoryDownloadURLRequest {}
+struct GetHistoryDownloadURLData {}
+struct GetHistoryDownloadURLResponse {}
+struct GetHistoryUploadURLRequest {}
+struct GetHistoryUploadURLData {}
+struct GetHistoryUploadURLResponse {}
+struct CheckHistoryExistsRequest { exists: bool }
+struct CheckHistoryExistsData {}
+struct CheckHistoryExistsResponse {}
+struct GetMessagesRequest {}
+struct RemoteGetMessagesData {}
+struct RemoteGetMessagesResponse {}
+struct BatchSyncHistoryRequest { visible_message_ids: Vec<id> }
+struct BatchSyncHistoryResponse {}
+
+struct ChatSessionListItem {
+    // 14 elements - session metadata for list display
+    // Fields: fs_server_url, vm_host_dir_mapping_list
+}
+```
+
+### 151.3 Client & User Metadata
+
+**Source:** `apps/icube_server_rs/modules/ai-agent/src/domain/lite/typing.rs`
+
+```rust
+struct ClientInfo {
+    // 38 elements - icube_language, icube_ai_language, request_traffic_type,
+    // client_type, platform, version, extensions, OEM info
+    // Extensive client identification for routing, analytics, and feature gating
+}
+
+struct UserInfo {
+    // 10 elements - user_id, display_name, avatar, email, is_internal,
+    // loginScope, enterprise_info
+    // Fields: is_internal (ByteDance internal flag), loginScope, enterprise_info (EnterpriseInfo)
+}
+
+struct EnterpriseInfo {
+    // 1 element
+}
+
+struct TerminalInfo {
+    // 3 elements - maxTerminalCount, availableTerminals, defaultShellType
+}
+
+struct TerminalInfoItem {
+    // 6 elements
+}
+
+struct ErrorResponse {
+    // 4 elements - error_code, message, details
+}
+```
+
+### 151.4 Handoff Protocol
+
+**Source:** `apps/icube_server_rs/modules/ai-agent/src/domain/handoff` module
+
+```rust
+struct HandoffDownSessionRequest {}
+struct HandoffDownSessionData {
+    // messages_restored, messages_archived, warnings
+}
+
+struct HandoffUpSessionRequest {}
+struct HandoffUpSessionData {
+    // lru, lfu, linear_decay, exponential_decay, hybrid_half_life, w_tinylfu
+}
+
+struct StateNotificationRequest {}
+struct StateNotificationResponse {}
+struct CancelResolveConflictsRequest {}
+struct CancelResolveConflictsData {}
+
+struct GetReturnToLocalSessionGitContextReq {}
+struct GetReturnToLocalSessionGitContextResp {}
+
+enum ReturnToLocalJwtStrategy {
+    // Reuse, External
+}
+
+enum ReturnToLocalSessionSource {}
+enum ReturnToLocalSessionTarget {}
+```
+
+### 151.5 Hub Bridge WebSocket Messages
+
+**Source:** `prost` protocol buffer definitions
+
+```rust
+struct WsMessage {
+    // 4 elements - message type, payload, metadata
+}
+
+struct WsProtoConfirmWsMessage {
+    // 2 elements
+}
+
+struct RegisterCliResponse {
+    // 1 element
+}
+
+struct HubRemoteConfig {
+    // 17 elements - frontier_app_id, frontier_product_id, frontierUrl,
+    // maxWsReconnectAttempts, wsReconnectDelaySecs, pollIntervalMs,
+    // flushIntervalMs, flushCountThreshold, wsMsgSizeThreshold,
+    // pushSync, pushConversationSize, pushMessageSize,
+    // syncSessionChunkSize, maxSentMessageCache, cli, seq_num
+}
+
+// WebSocket message types for session sync:
+// WsProtoCLI, WsProtoCliPushConversationsDelete, WsProtoCliPushDeleteMessages
+// WsProtoSessionCreated, WsProtoSessionUpdated, WsProtoSessionDeleted
+// WsProtoCliPushMessageDelete, WsProtoCliPushMessageRevert
+// CliRequest, CliResponse, CreateTask, DeleteTask, BatchInsertEvents
+```
+
+---
+
+## 152. Agent Context & @mention Protocol
+
+### 152.1 AgentContext
+
+**Source:** `apps/icube_server_rs/modules/ai-agent/src/handler/chat/query_parser.rs` and context resolver modules
+
+The AgentContext captures the full IDE state for AI context building. It includes workspace structure, open files, terminal output, problem markers, lint errors, rule files, web search results, and user interaction history. This rich context enables the AI to understand the user's development environment without explicit description.
+
+**Context:** Before each AI turn, Trae resolves the current context into a structured AgentContext. Context resolvers gather data from 20+ sources (current editor, terminal, problems, lint errors, rules, docs, web search, browser selection, file diffs, slash commands, etc.). The resolved context is rendered into the LLM prompt via a complex rendering pipeline.
+
+```rust
+struct AgentContext {
+    // 43 elements - comprehensive IDE state snapshot for AI context building
+    // Categories:
+    //   Editor state: current editors, selections, visible ranges
+    //   Terminal: active terminals, output buffers, shell type
+    //   Problems: lint errors, build errors, warnings
+    //   Rules: active rule files, custom instructions
+    //   Docs: open documentation pages
+    //   Web: browser elements, web search results
+    //   History: recent file changes, chat history context
+    //   User input: current prompt, @mentions, slash commands
+    //   Review markers: code review comments, inline suggestions
+}
+
+struct WorkspaceContext {
+    // 5 elements - platform (local/remote/cloud), workspace folders
+}
+
+struct ModelSmartSelection {
+    // 3 elements
+}
+
+struct ModelSmartSelectionMeta {
+    // 2 elements
+}
+```
+
+### 152.2 @mention System
+
+The `#` (hash) mention system allows users to reference specific artifacts in their prompts. Each mention type has a dedicated resolver and context structure.
+
+**Source:** `query_parser.rs`
+
+```rust
+struct MentionContext {
+    // 22 elements - only_mention flag + all hash reference types:
+    // hash_symbols, hash_folders, hash_docs, hash_web_elements,
+    // hash_logs, hash_figma, hash_lint_error_flag, hash_rule_files,
+    // hash_problem_items, hash_problem_files, hash_attachments,
+    // hash_images, hash_comment_data_sheets, hash_comment_data_texts,
+    // hash_comment_data_markdowns, hash_agent_review_marker
+}
+
+struct MentionHashSymbol {
+    // 6 elements - symbol reference (function, class, variable)
+}
+
+struct MentionHashFolders {
+    // 2 elements - folder references
+}
+
+struct MentionHashFile {
+    // 2 elements - file references (with path)
+}
+
+struct MentionHashRuleFile {
+    // 7 elements - relatePath, rule file references
+}
+
+struct MentionHashDoc {
+    // 7 elements - documentation references
+}
+
+struct MentionHashWeb {
+    // 2 elements - web URL references
+}
+
+struct MentionHashWebElement {
+    // 7 elements - relative_path, web element references
+}
+
+struct MentionHashLog {
+    // 4 elements - terminal log references
+}
+
+struct MentionFigmaFile {}
+struct MentionFigma {}
+
+struct MentionHashProblemItem {
+    // 10 elements - problem/lint references
+}
+
+struct MentionHashProblemFile {
+    // 4 elements - problem file references
+}
+
+struct SlashCommandInfo {
+    // 5 elements - parameter_values, slash command metadata
+}
+
+struct MentionAttachment {}
+
+struct MentionHashImage {
+    // 2 elements - image attachment
+}
+
+struct MentionCommentSheetSelection {
+    // 2 elements - sheet data selection
+}
+
+struct MentionCommentDataSheet {
+    // 4 elements - spreadsheet/table comment data
+}
+
+struct MentionCommentDataTextPage {}
+struct MentionCommentDataTextSelection {}
+struct MentionCommentDataText {
+    // 3 elements - text comment data
+}
+
+struct MentionCommentDataMarkdownSelection {}
+struct MentionCommentDataMarkdown {
+    // 7 elements - full_content, markdown comment data
+    // Fields: review_and_resolve (review|resolve)
+}
+
+struct MentionAgentReviewMarker {
+    // 3 elements - AI review marker references
+}
+```
+
+### 152.3 Editor & Terminal Context
+
+**Source:** IDE context resolvers
+
+```rust
+struct TerminalContextVariable {
+    // 5 elements - terminal state: working directory, command history, output
+}
+
+struct FileIdentInfo {
+    // 2 elements
+}
+
+struct Language {
+    // 2 elements - language_id
+}
+
+struct Position {
+    // 2 elements - line, character
+}
+
+struct Range {
+    // 4 elements - start_line, start_char, end_line, end_char
+}
+
+struct Selection {
+    // 7 elements - text selection metadata
+}
+
+struct Document {
+    // 10 elements - file document metadata
+}
+
+struct VSTextDocument {
+    // 7 elements - VS Code specific text document
+}
+
+struct TextDocument {
+    // 6 elements - generic text document
+}
+
+struct DocumentFromCommand {
+    // 10 elements - command-generated document
+}
+
+struct EditorRange {
+    // 4 elements - startLineNumber, startColumn, endLineNumber, endColumn
+}
+
+struct IFunctionsRange {
+    // 8 elements - function range in editor
+}
+
+struct ForceToolCallInput {
+    // 6 elements - node_type, start_index, end_index
+}
+```
+
+---
+
+## 153. CKG Embedding & Retrieval Protocol
+
+### 153.1 Code Knowledge Graph (CKG) Methods
+
+**Source:** `volo-gen` generated protobuf code, `protocol.CodeKG` service
+
+The Code Knowledge Graph provides semantic code understanding through embedding-based retrieval. CKG powers features like "Find Relevant Code", intelligent code navigation, and context-aware suggestions. It uses gRPC (via Volo framework) with both IPC and TCP transport modes.
+
+**Context:** CKG indexes code into a vector database with embeddings. Retrieval supports multiple recall strategies: user-specified, embedding similarity, user action trace, and git relevance. The CKG server runs as a separate process (ckg_server binary, ~44MB) and communicates via gRPC over the `protocol.CodeKG` service.
+
+```text
+CKG gRPC Methods (protocol.CodeKG/ prefix, 35 total):
+
+  Ping                                    - Health check
+  SetUp                                   - Initialize CKG service
+  SetPrivacyMode                          - Toggle privacy/anonymization
+  Init                                    - Initialize project index
+  InitVirtualProjects                     - Virtual project indexing
+  DocumentCreate                          - Index new document
+  DocumentChange                          - Re-index changed document
+  DocumentDelete                          - Remove from index
+  DocumentSelect                          - Select document for indexing
+  CursorMove                              - Update cursor position context
+  GetBuildStatus                          - Query index build status
+  GetDocumentsIndexStatus                 - Query specific document status
+  CancelIndex                             - Cancel indexing operation
+  DeleteIndex                             - Delete project index
+  RetrieveCodeChunk                       - Search code by embedding similarity
+  RetrieveRelation                        - Find code relations/dependencies
+  RetrieveEntity                          - Find code entities (classes, functions)
+  RetrieveRelevantSnippet                 - Semantic snippet search
+  RerankSnippet                           - Re-rank search results for relevance
+  RefreshToken                            - Refresh CKG auth token
+  IsVersionMatched                        - Check CKG version compatibility
+  ImportAnalysis                          - Import code analysis results
+  FilesImportAnalysis                     - Batch file analysis import
+  SearchCKGDB                             - Direct database search
+  IsCKGEnabledForNonWorkspaceScenario     - Feature availability check
+  GetFileOutline                          - Get file structure outline
+  EmbeddingSearch                         - Vector embedding search
+  RetrieveDocChunk                        - Retrieve documentation chunk
+  CfsRead                                 - Read from content-addressable store
+  CfsListDir                              - List directory in content-addressable store
+  CfsResolve                              - Resolve content-addressable path
+```
+
+### 153.2 Retrieval Strategies
+
+```text
+Recall Types:
+  RECALL_TYPE_USER_SPECIFIED                = User-specified explicit references
+  RECALL_TYPE_EMBEDDING                     = Vector embedding similarity search
+  RECALL_TYPE_RELATION_BY_USER_ACTION_TRACE = User navigation/action pattern
+  RECALL_TYPE_RELATION_BY_GIT_RELEVANCE     = Git change relevance
+
+Snippet Types:
+  SNIPPET_TYPE_CODE                         = Code snippet
+  SNIPPET_TYPE_FOLDER_TREE                  = Folder/directory structure
+  SNIPPET_TYPE_FILE                         = Full file content
+```
+
+### 153.3 CKG Data Structures
+
+**Source:** `volo-gen` generated protobuf types
+
+```rust
+struct EmbeddingVariable {
+    // 5 elements - vector embedding with metadata (code snippet -> vector representation)
+}
+
+struct EmbeddingChunkVariable {
+    // 5 elements - chunked embedding for large documents
+}
+
+struct CodeChunkVariable {
+    // code chunk with range context
+}
+
+struct DocChunk {
+    // documentation chunk
+}
+
+struct CodeVariable {
+    // code entity with location info
+}
+
+struct FileVariable {
+    // file metadata
+}
+
+struct ClassVariable {
+    // class/type definition
+}
+
+struct MethodVariable {
+    // method/function definition
+}
+
+struct FolderVariable {
+    // folder/directory reference
+}
+
+struct TextVariable {
+    // text content for embedding
+}
+
+struct SelectedMethodInfo {
+    // method selection context
+}
+
+struct Member {
+    // struct/class member
+}
+
+struct RefClassInfo {
+    // referenced class info
+}
+
+struct RefTypeInfo {
+    // reference type info
+}
+
+struct FileRule {
+    // processed_content, file_rules
+}
+
+struct BrowserCodeVariable {
+    // source_code
+}
+
+struct LogMessageVariable {
+    // log entry
+}
+
+struct Entity {}
+struct Reference {}
+struct Snippet {}
+struct Range {
+    // code location range
+}
+struct Error {}
+struct Empty {}
+struct UsefulFileInfo {}
+
+struct DocumentBuildStatus {
+    // 3 elements
+}
+
+struct DocumentIndexStatus {
+    // 3 elements
+}
+
+struct SetUpResponse {}
+struct InitResponse {}
+struct InitVirtualProjectsResponse {}
+struct DeleteIndexResponse {}
+struct CancelIndexResponse {}
+struct RefreshTokenResponse {}
+struct SetPrivacyModeResponse {}
+struct GetFileOutlineResponse {}
+struct IsCkgEnabledForNonWorkspaceScenarioResponse {}
+struct FileTopLevelVariable {}
+struct ClassTopLevelVariable {}
+
+// CKG Slardar event payload types:
+// CkgJrpcCallFailedPayload, CkgRetrievalSlardarEventParams
+// CKGEventPayload with fields: ckg_err_code, ckg_action_code, ks_action_code
+// ckg_method includes: documentAction, retrieveEntity, retrieveRelation,
+// getBuildStatus, cancelIndex, deleteIndex, setUp
+```
+
+---
+
+## 154. Lite VM Protocol
+
+### 154.1 VM Lifecycle Management
+
+**Source:** `apps/icube_server_rs/modules/ai-agent/src/domain/lite/typing.rs`
+
+The Lite VM provides sandboxed execution environments for AI agent operations. VMs are created per-chat-session and support file system operations, command execution, and browser automation. The VM lifecycle includes creation, initialization (with progress tracking), operation, and cleanup.
+
+**Context:** Lite VMs are allocated on remote hosts and accessed via WebSocket/VNC. Each VM has a sandboxed file system isolated from the host. The agent runs commands inside the VM, reads/writes files, and uses a browser running inside the VM for web automation. VM resources are managed via the remote sandbox infrastructure.
+
+```rust
+struct CreateProjectRequest {}
+struct ListProjectsRequest {}
+struct ListProjectsData {
+    // project list
+}
+struct GetProjectRequest {}
+struct GetProjectByFolderRequest {}
+struct UpdateProjectRequest {}
+struct DeleteProjectRequest {}
+
+struct GetDiffViewRequest {}
+struct DiffViewFileDiffInfo {}
+struct DiffViewChangedFile {
+    // insert/delete line counts
+}
+struct GetDiffViewData {
+    // total_insert_line_count, total_delete_line_count
+}
+
+struct GetSessionProductsRequest {}
+struct GetSessionProductsData {}
+struct GetSessionProductsDataTool {
+    // hostStatusData
+}
+
+struct CommitChatSessionRequest {}
+struct FreezeChatSessionRequest {}
+struct StopChatSessionRequest {}
+struct DeleteChatSessionRequest {}
+struct GetMessagesRequest {}
+struct GetMessagesData {}
+struct GetMessageByIdRequest {}
+struct GetMessageByIdData {}
+
+struct SendMessageRequest {
+    // 10 elements - message content, model_config, attachments
+}
+
+struct SendMessageData {
+    // message confirmation
+}
+
+struct SubscribeEventsRequest {}
+struct SubscribeEventsResponse {}
+
+struct ListChatSessionsRequest {
+    // 6 elements - page_token, repo
+}
+
+struct ListChatSessionsData {
+    // 3 elements - next_page_token
+}
+
+struct GetChatSessionRequest {
+    // 1 element
+}
+
+struct TargetSandboxInfo {
+    // cluster_name, pod_name
+}
+
+struct InitialMessage {}
+```
+
+### 154.2 VM Init & Status Events
+
+```rust
+struct VmInitProgressPayload {
+    // stage, stage_message, stage_percentage
+}
+
+struct StatusChangedPayload {
+    // old_status, new_status
+}
+
+struct VmOperateRequest {}
+struct VmOperateResponseData {}
+struct VmOperateResponse {}
+
+// Lite VM State Events
+enum StateEvent {
+    session_created,
+    session_updated,
+    session_deleted,
+    project_created,
+    project_updated,
+    project_deleted,
+    message_deleted,
+    message_reverted,
+    scheduled_task_created,
+    scheduled_task_updated,
+    scheduled_task_deleted,
+    scheduled_task_triggered,
+    scheduled_task_execution_completed,
+    scheduled_task_disabled,
+}
+
+// Pending task payload for Lite VM operations
+enum PendingTaskPayload {
+    CreateSession(SendMessageData),
+    SendMessage(SendMessageData),
+}
+```
+
+---
+
+## 155. Tool Calling Protocol
+
+### 155.1 LLM Client Tool Call System
+
+**Source:** `llm-client` crate and tool handler modules
+
+The Tool Calling Protocol normalizes tool calls across different AI providers. Each provider has its own tool call format (Anthropic: tool_use content blocks, OpenAI: tool_calls, AWS Bedrock: toolUse content blocks, Gemini: functionCall). The LLM client layer converts all formats to unified internal structures.
+
+**Context:** Tools are defined using the OpenAI-compatible function definition format (name, description, parameters schema). The LLM client formats tools according to each provider's requirements. Tool call responses are parsed from provider-specific formats and normalized for the agent system.
+
+```rust
+struct LLMClientToolCall {
+    // 5 elements - id, type, function, index, delta
+    // Used for streaming tool call chunks (delta contains partial JSON)
+}
+
+struct LLMClientToolCallFunction {
+    // 2 elements - name, arguments
+}
+
+struct LLMClientToolCallExtraContent {
+    // additional content for tool calls
+}
+
+struct LLMClientToolCallExtraContentGoogle {
+    // thought_signature - Gemini-specific
+    // Gemini's thinking/chain-of-thought metadata attached to tool calls
+}
+
+struct RawLLMResponseToolCall {
+    // 3 elements
+}
+
+struct RawLLMResponse {
+    // 1 element
+}
+
+struct LLMClientTool {
+    // tool definition
+}
+
+struct LLMClientToolFunction {
+    // tool function signature
+}
+```
+
+### 155.2 Provider-Specific Tool Calling
+
+```rust
+// Anthropic format
+struct AnthropicTool {
+    // name, description, input_schema (JSON Schema)
+}
+
+// OpenAI format
+struct OpenAITool {
+    // type, function (OpenAIToolFunction)
+}
+
+struct OpenAIToolFunction {
+    // name, description, parameters (JSON Schema)
+}
+
+// AWS Bedrock format: tool_use content blocks
+// Fields: toolUseId, name, input (JSON)
+
+// Google Gemini format: functionCall content blocks
+// Fields: name, args (JSON)
+
+// Native Finish Reasons:
+// end_turn, tool_use, stop_sequence, content_filtered
+```
+
+### 155.3 Tool Choice & Forcing
+
+```rust
+struct ToolChoiceFullMode {}
+struct ToolChoiceToolItem {}
+
+struct ForceToolCallInput {
+    // 6 elements - node_type, start_index, end_index
+    // Forces the LLM to call a specific tool based on context matching
+}
+```
+
+### 155.4 Tool Call Metrics & Telemetry
+
+**Source:** Slardar event parameters
+
+```rust
+struct AgentToolcallManualConfirmTeaParams {
+    // toolcall_params, auto_run, auto_run_mode
+}
+
+struct PlanToolTokenUsageParams {
+    // tool_calls_count, token usage metrics
+    // Includes: real_output_token, real_reason_token, token_output_rate
+}
+
+struct AgentToolCallTeaParams {
+    // run_duration, mcp_name, wait_duration, is_command_edited, is_block,
+    // diff_insert_line_count, diff_delete_line_count, filename_extensions,
+    // solo_chat_mode, has_virtual_paths, sandbox_awareness_enabled
+}
+```
+
+### 155.5 Tool Call Cache System
+
+```rust
+struct ToolCacheDataEvent {
+    // 2 elements - groups
+}
+
+struct ToolCacheGroup {
+    // 3 elements - group_name
+}
+
+struct ToolCacheItem {
+    // 3 elements
+}
+
+struct ToolCacheInfo {
+    // tool_use_cache configuration for Anthropic prompt caching
+}
+```
+
+---
+
+## 156. Dynamic Config & A/B Testing Protocol
+
+### 156.1 Application-Level Configuration
+
+**Source:** `apps/icube_server_rs/modules/ai-agent/src/infrastructure/adapter/ide_command/dynamic_config.rs`
+
+Trae uses a dynamic configuration system that supports real-time feature flag updates without restarting the IDE. Configuration is fetched from a remote server and cached locally. A/B testing is supported through experiment groups with configurable TTL.
+
+**Context:** The `DynamicConfigICubeAppData` struct is the root configuration object that contains all feature flags and behavior-modifying knobs. Each subsystem has its own config struct nested within it. Config is fetched asynchronously via `DynamicConfigGeneratedFetch` and cached with configurable TTL. A/B experiments use function-based config fetching by name.
+
+```rust
+struct DynamicConfigICubeAppData {
+    // Root configuration with 35+ subsystems:
+    // feature_gates - Feature flag system for staged rollouts
+    // snapshot_v2, snapshot_clean_up, snapshot_ignore - Snapshot system
+    // auto_accept - Auto-accept code changes
+    // agentic_flow_config - Agent flow control (max turns, etc.)
+    // agentic_auto_model_config - Automatic model selection
+    // agentic_summary_config - Context summarization
+    // ai_features - AI behavior parameters (mcpToolLimit, etc.)
+    // context_usage_chunk - Context window chunking
+    // http_timeout_config - SSE retry/backoff config
+    // solo_builder_config_name, error_log_report
+    // agent_v3 - Agent V3 multi-agent system
+    // evaluation_config, auto_run_config
+    // sqlite_optimization - Database tuning
+    // finish_collect_strategy
+    // custom_model_fallback_config - Fallback behavior for custom models
+    // mb_config, builtin_skill_mapping
+    // chat_memory_with_history, chat_skill_recommend
+    // virtual_path, hub_config, solo_vm_config
+    // aigc_tag_config, prompt_meta_filter_config
+    // skill_as_agent, generate_image
+    // toolcall_output_persistence_visible
+    // toolcall_output_persistence_default_enabled
+}
+```
+
+### 156.2 AI Features Configuration
+
+**Source:** Dynamic config AI features sub-system
+
+```rust
+struct DynamicConfigAiFeatures {
+    // mcp_tool_limit (default: 40), mcp_token_limit (default: 8000),
+    // mcp_token_limit_m8, mcp_tool_hard_cap
+    // custom_prompt_token_limit, custom_prompt_token_limit_m8
+    // disable_prompt_selected_code
+    // fix_edit_file_size_limit
+    // chat_message_query_limit, history_query_limit
+    // server_history_cache_limit, server_history_sync_timeout_secs
+    // enable_llm_utils_cloud
+    // raw_rules_max_chars, snippet_content_max_char_count, category_content_max_char_count
+    // tool_confirm_timeout_secs
+    // schedule_task_max_count, schedule_min_interval_minutes
+
+    // V3 Agent knobs:
+    // solo_builder_config_name, solo_coder_disable_sub_agents
+    // solo_coder_disable_plan_mode, solo_coder_cumulative_compaction_strategy
+    // v3_parallel_agents_disabled, v3_max_concurrent_tasks
+    // v3_concurrent_task_timeout
+}
+```
+
+### 156.3 HTTP Timeout & Retry Configuration
+
+```rust
+struct HTTPTimeoutConfig {
+    // http_response_header_timeout
+    // http_sse_stream_timeout (noEventTimeout: 30000ms)
+    // http_upstream_call_timeout
+    // http_sse_no_event_timeout
+    // max_retry_count (3), retry_timeout (1000ms),
+    // retry_http_code [502, 503, 504]
+    // internal_network_timeout
+}
+```
+
+### 156.4 Context Usage Chunking
+
+```rust
+struct DynamicConfigContextUsageChunk {
+    // max_items, max_bytes
+}
+```
+
+### 156.5 A/B Testing Configuration
+
+```rust
+// Dynamic configuration fetchers by name:
+// get_abtest_shallow_memento_with_fetch
+// get_abtest_core_memory_with_fetch
+// get_abtest_trae_knowledges_skill_with_fetch
+// get_abtest_trae_code_review_skill_with_fetch
+// get_abtest_trae_security_review_skill_with_fetch
+// get_abtest_trae_debugger_skill_with_fetch
+// get_abtest_trae_ui_code_design_skill_with_fetch
+
+// Each uses DynamicConfigGeneratedFetch pattern:
+// - Refreshes cache on request
+// - Uses configurable TTL
+// - Returns cached value or fetched value
+// - Supports config_name and function parameter
+
+struct ABTestTraeCodeReviewSkill {
+    // Code review skill A/B test config
+}
+
+struct ABTestTraeSecurityReviewSkill {
+    // Security review skill A/B test config
+}
+
+struct ABTestTraeUiCodeDesignSkill {
+    // UI code design skill A/B test config
+}
+
+struct ABTestTraeKnowledgesSkill {
+    // Knowledges skill A/B test config
+}
+```
+
+### 156.6 Agent Flow & Behavior Configuration
+
+```rust
+struct DynamicAgenticFlowConfig {}
+
+struct DynamicAgenticFlowConfigMatch {
+    // max_plan_turns, max_left_turns
+    // enable_user_prompt_cache, toolcall_cache_limit
+}
+
+struct DymanicAgenticSummaryConfig {
+    // summary_message_token_limit
+    // kept_history_token_limit, kept_history_message_limit
+    // minimum_current_turn_token_usage
+    // multimodal_summary_look_back_count
+}
+
+struct DynamicConfigAgentV3 {
+    // 1 element - Agent V3 system flag
+}
+
+struct ChatMemoryWithHistoryConfig {}
+struct ChatSkillRecommendConfig {}
+struct VirtualPathConfig {}
+
+struct SoloVMConfig {
+    // fetch_max_connections
+}
+
+struct PromptMetaFilterConfig {
+    // disable_prompt_fetching, function_filters
+}
+
+struct SnapshotV2 {
+    // enable_v2, force_double_write
+}
+struct SnapshotCleanUp {}
+struct SnapshotIgnore {
+    // ignore_rule_list
+}
+
+struct CustomModelFallbackConfig {
+    // poll_interval, flush_interval, max_send_retries
+}
+```
+
+### 156.7 Model Extra Configuration (142 Parameters)
+
+The AI Features system includes an extensive 142-parameter model extra configuration that controls every aspect of AI agent behavior:
+
+```rust
+struct ModelExtraConfig {
+    // 142 elements - comprehensive AI behavior tuning knobs
+    //
+    // Category: Token & Context Limits
+    //   v2_kept_history_token_limit, v2_kept_history_message_count_limit
+    //   v2_current_turn_min_token_quota
+    //   v2_multimodal_summary_look_back_count, v2_multimodal_per_message_token_limit
+    //   v2_summary_message_token_limit
+    //
+    // Category: Rendering & View Files
+    //   v2_render_by_dsl, v2_render_by_dsl_with_one_function
+    //   v2_view_file_auto_expand, v2_view_file_truncated_and_hint
+    //   v2_view_file_max_file_size_kb, v2_view_file_enable_outline
+    //   v2_view_file_max_char_size
+    //
+    // Category: Search & Tool Calls
+    //   v2_search_codebase_result_max_token
+    //   v2_detect_hash_mention_file_linter_error
+    //   v2_edit_file_linter_error, v2_read_old_linter_error_enabled
+    //   run_command_output_char_count, run_command_max_blocking_ms
+    //   run_command_default_timeout_ms
+    //   max_duplicated_tool_calls, stop_duplicated_tool_calls
+    //
+    // Category: Native Function Call (NFC)
+    //   native_function_call, nfc_force_use_edit_file_update
+    //   parallel_tool_calling, nfc_use_original_tool_call_id
+    //
+    // Category: Compression & Memory
+    //   v2_max_mode_enabled, v2_post_compress_enabled
+    //   shallow_memento_disabled, core_memory_block_rough_max_token
+    //   history_adapter_strategy
+    //
+    // Category: Agent V3
+    //   v3_solo_coder_disable_sub_agents, v3_solo_coder_disable_plan_mode
+    //   v3_solo_coder_cumulative_compaction_strategy
+    //   v3_passive_compaction_user_perceptible
+    //   v3_compaction_token_limit_ratio, v3_async_compaction_token_limit_ratio
+    //   v3_micro_compact_trigger_token_ratio
+    //   v3_max_concurrent_tasks, v3_concurrent_task_timeout
+    //   v3_parallel_agents_disabled
+    //
+    // Category: File Operations
+    //   v3_read_max_content_byte_size, v3_read_enable_truncation
+    //   v3_grep_max_result_chars, v3_glob_enable_ripgrep
+    //   replace_edit_tools_by_apply_patch
+    //   v3_enable_multi_edit_tool
+    //
+    // Category: Cloud & Browser
+    //   cloud_agent_snippet_content_max_char_count
+    //   enable_browser_screenshot_auto_read
+    //
+    // Category: Read Dedup
+    //   v3_file_read_state_cache_enabled, v3_read_dedup_enabled
+    //   enable_read_enoent_path_suggestion
+    //
+    // Category: Core Memory
+    //   enable_core_memory, disable_exit_plan_mode_tool
+    //
+    // Category: Tool Choice
+    //   enable_nfc_prefill_agent_name
+    //   v3_optimize_tool_choice_strategy
+    //   v3_rename_custom_tool_apply_patch_name
+}
+```
+
+---
+
+## 157. Dynamic Configuration Loading
+
+### 157.1 Configuration Fetch System
+
+**Source:** `dynamic_config.rs`
+
+Configuration is loaded dynamically from remote servers with cache refresh. The system supports A/B testing by function name.
+
+```rust
+// DynamicConfigGeneratedFetch pattern:
+//   - Fetch by function name (get_abtest_*, get_dynamic_config_with_fetch)
+//   - Cache with configurable TTL
+//   - Async refresh on cache miss
+//   - Fallback to default values on network failure
+
+struct DynamicConfigData {
+    // iCubeApp struct containing all subsystem configs
+}
+
+// TTL (Time-To-Live) values are configurable per-config:
+//   - Standard config: 5 minutes
+//   - A/B test config: 10 minutes
+//   - Feature gates: 2 minutes (for fast rollouts)
+
+struct DynamicConfigGenerateImage {
+    // enable_stream
+}
+
+struct DynamicConfigLintError {
+    // advanced_fix_once_after_finish
+}
+
+struct DynamicConfigTodoList {}
+
+struct DynamicConfigDynamicUI {}
+```
+
+---
+
+## 158. Additional Protocol Artifacts
+
+### 158.1 Slardar Event Payloads (Telemetry)
+
+**Source:** Slardar event definitions (~120+ metric events)
+
+Trae tracks detailed telemetry through Slardar (internal metrics system). Events span the full AI agent lifecycle:
+
+```text
+Agent Events:
+  IcubeAiAgentWsHandler, IcubeAiAgentApplyInvoke, IcubeAiAgentApplySearchReplace
+  IcubeAiAgentTaskProposalFinish, IcubeAiAgentTaskProposalFirstToken
+  IcubeAiAgentTaskProposalFinalToken, IcubeAiAgentTaskProposalIntent
+  IcubeAiAgentTaskPlanAll, IcubeAiAgentTaskPlanSubAgents
+  IcubeAiAgentTaskPlanFinish, IcubeAiAgentTaskPlanRetry
+  IcubeAiAgentToolcall, IcubeAiAgentToolcallCustomEvent, IcubeAiAgentToolcallMcp
+
+LLM Events:
+  IcubeAiAgentModelLLMRenderTokenUsage, IcubeAiAgentModelLLMStream
+  IcubeAiAgentModelLLMStreamFirstToken, IcubeAiCustomModelRequestBuilder
+  IcubeAiAgentModelSync, IcubeAiAgentModelParse
+  IcubeAiAgentModelDbCacheSave, IcubeAiAgentModelDbCacheMiss
+  IcubeAiAgentModelListByFunction, IcubeAiAgentModelFallback
+
+CKG Events:
+  IcubeAiAgentCkgRetrieval, IcubeAiCkgRequest, IcubeAiCkgResolver
+  IcubeAiAgentDocsetRetrieve, IcubeAiAgentCkgJrpcCallFailed
+
+Agent V3 Events:
+  IcubeAiAgentV3ExecuteMultiAgentTask, IcubeAiAgentV3ExecuteWorkflow
+  IcubeAiAgentV3CreateAgent, IcubeAiAgentV3CreateInitialTaskHandle
+  IcubeAiAgentV3HilWaitForToolConfirmation
+
+Snapshot Events:
+  IcubeAiAgentCreateSnapshot, IcubeAiAgentUpdateSnapshot
+  IcubeAiAgentListSnapshot, IcubeAiAgentRevertSnapshot
+  IcubeAiAgentStorageSnapshot, IcubeAiAgentDoubleWriteSnapshot
+
+Model Events:
+  IcubeAiAgentAutoModelSelectionFetchRemote, IcubeAiAgentAutoModelSelectionAwait
+  IcubeAiAgentBootConfigAwait
+
+Context/Memory:
+  IcubeAiCoreMemOp, IcubeAiCoreMemEvict, IcubeAiCmForget, IcubeAiCmHit
+  IcubeAiAgentPreTermination, PreTerminationStarted, PreTerminationCompleted
+
+Misc:
+  IcubeAiAgentWebSearch, IcubeAiAgentCrawlerContent, IcubeAiAgentLintErrorsContextResolved
+  IcubeAiAgentCheckDiagnosis, IcubeAiAgentHistoryV2Save, IcubeAiAgentHistoryV2Load
+  IcubeAiAgentReadDedup, IcubeAiAgentGenerateImage, IcubeAiAgentLiteVmStartup
+  IcubeAiAgentScheduleExecution, IcubeAiAgentScheduleConfig
+```
+
+### 158.2 Authentication Artifacts
+
+**Source:** AWS SDK SSO, OAuth2 flows
+
+```rust
+// AWS SSO/OIDC authentication types:
+// SsoCredentialsProvider, SsoProviderConfig
+// SsoTokenProvider, SsoTokenProviderError
+// TokenProviderConfig (aws-config crate)
+//
+// Error types from AWS auth:
+// BadExpirationTimeFromSsoOidc, ExpiredToken
+// FailedToFormatDateTime, NoHomeDirectory
+// CredentialsNotLoaded, ProviderTimedOut
+// InvalidConfiguration, ProviderError, TokenNotLoaded
+//
+// IMDS (Instance Metadata Service) types:
+// ImdsError, TtlToken, ImdsCommunicationError
+// FailedToLoadToken, UnexpectedTokenError
+//
+// Credential provider chain types:
+// HttpProviderAuth, CredentialsError
+// ProfileDidNotContainCredentials, CredentialLoop
+// InvalidCredentialSource, UnknownProvider
+// FeatureNotEnabled, MissingSsoSession
+// InvalidSsoConfig, NoProfilesDefined
+```
+
+### 158.3 Data Serialization Artifacts
+
+**Source:** serde/sqlx crate types
+
+```rust
+// SQLite configuration artifacts discovered:
+// PRAGMA key = (SQLCipher encryption key)
+// PRAGMA cipher_store_pass = deprecated
+// PRAGMA cipher = no longer supported
+// PRAGMA rekey_cipher = no longer supported
+// PRAGMA fast_kdf_iter = deprecated
+// PRAGMA page_size = 4096
+// PRAGMA cache_size = -2000
+// PRAGMA mmap_size
+// PRAGMA wal_autocheckpoint
+// PRAGMA temp_store = MEMORY
+// PRAGMA journal_mode = WAL
+// PRAGMA synchronous = NORMAL
+// PRAGMA busy_timeout
+// PRAGMA query_only = ON
+//
+// sqlx-sqlite connection management:
+// Pool configuration: max_connections, acquire_timeout, max_lifetime
+// Read/Write split support: ICUBE_ENABLE_DB_RW_SPLIT
+// Separate pool configs for read and write connections
+
+// Cargo registry mirror:
+// index.crates.io-1949cf8c6b5b557f (standard)
+// rsproxy.cn (China mirror for build speed)
 ```
 
 ---
