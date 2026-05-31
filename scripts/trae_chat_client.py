@@ -96,9 +96,16 @@ def fetch_boot_config(region: str = "us") -> Dict[str, Any]:
 
 
 def exchange_token(token_host: str, refresh_token: str) -> Dict[str, Any]:
-    url = f"{token_host.rstrip('/')}/cloudide/api/v3/trae/ExchangeToken"
-    headers = {"Authorization": f"Bearer {refresh_token}", "Content-Type": "application/json"}
-    payload = {"client_id": CLIENT_ID, "grant_type": "refresh_token", "refresh_token": refresh_token}
+    """
+    用 refresh_token 换取新的 access_token + refresh_token。
+
+    实际验证过的请求格式（从 main.js 提取）:
+    POST {host}/cloudide/api/v3/trae/oauth/ExchangeToken
+    Body: {"ClientID": "ono9krqynydwx5", "RefreshToken": "...", "ClientSecret": "-", "UserID": ""}
+    """
+    url = f"{token_host.rstrip('/')}/cloudide/api/v3/trae/oauth/ExchangeToken"
+    headers = {"Content-Type": "application/json", "x-cloudide-token": refresh_token}
+    payload = {"ClientID": AUTH_CLIENT_ID, "RefreshToken": refresh_token, "ClientSecret": "-", "UserID": ""}
     print(f"[*] 交换 Token: {url}")
     resp = requests.post(url, headers=headers, json=payload, timeout=10)
     if resp.status_code == 429:
@@ -107,7 +114,14 @@ def exchange_token(token_host: str, refresh_token: str) -> Dict[str, Any]:
         time.sleep(retry_after)
         return exchange_token(token_host, refresh_token)
     resp.raise_for_status()
-    return resp.json()
+    data = resp.json()
+    result = data.get("Result", {})
+    return {
+        "access_token": result.get("Token", ""),
+        "refresh_token": result.get("RefreshToken", ""),
+        "expires_in": result.get("TokenExpireDuration", 3600),
+        "expires_at": result.get("TokenExpireAt", 0),
+    }
 
 
 def get_access_token(region: str, token_host: str = None, refresh_token: str = None) -> str:
@@ -193,6 +207,7 @@ def send_chat_message(access_token: str, api_host: str, message: str,
     headers = {
         "x-ide-token": access_token,
         "x-cloudide-token": access_token,
+        "Authorization": f"Bearer {access_token}",
         "Content-Type": "application/json",
     }
 
@@ -222,6 +237,9 @@ def send_chat_message(access_token: str, api_host: str, message: str,
         if resp.status_code != 200:
             print(f"[!] API 错误: {resp.status_code} {resp.text[:500]}")
             return {"error": resp.status_code, "detail": resp.text[:500]}
+        if resp.headers.get("content-type", "").startswith("text/event-stream"):
+            print(f"[!] API 返回 SSE 错误: {resp.text[:500]}")
+            return {"error": 4001, "detail": resp.text[:500]}
         return resp.json()
 
 
