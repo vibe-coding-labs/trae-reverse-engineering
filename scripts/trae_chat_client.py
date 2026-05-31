@@ -201,9 +201,14 @@ def list_models(access_token: str, api_host: str) -> list:
 
 
 def send_chat_message(access_token: str, api_host: str, message: str,
-                      model: str = None, stream: bool = False) -> Dict[str, Any]:
-    """发送聊天消息到 Trae AI。"""
-    url = f"{api_host}/api/ide/v1/chat"
+                      model: str = None, stream: bool = False):
+    """
+    发送聊天消息到 Trae AI。
+
+    已验证：正确的 AI 聊天端点是 /api/ide/v1/agents/runs
+    返回 SSE 流，event: delta = 内容块，event: done = 完成
+    """
+    url = f"{api_host}/api/ide/v1/agents/runs"
     headers = {
         "x-ide-token": access_token,
         "x-cloudide-token": access_token,
@@ -213,34 +218,32 @@ def send_chat_message(access_token: str, api_host: str, message: str,
 
     payload = {
         "session_id": str(uuid.uuid4()),
-        "message": {
-            "content": message,
-            "role": "user",
-        },
-        "stream": stream,
+        "query": message,
+        "chat_mode": "agent",
         "model_config": {
             "model_name": model or "claude-3.5-sonnet",
         },
     }
 
     print(f"[*] 发送消息 (model={model or 'default'}): {url}")
+    resp = requests.post(url, headers=headers, json=payload, timeout=120, stream=stream)
+    if resp.status_code != 200:
+        print(f"[!] API 错误: {resp.status_code}")
+        return {"error": resp.status_code}
+
     if stream:
-        resp = requests.post(url, headers=headers, json=payload, timeout=120, stream=True)
-        resp.raise_for_status()
         for line in resp.iter_lines():
             if line:
                 decoded = line.decode("utf-8", errors="replace")
                 if decoded.startswith("data: "):
                     yield json.loads(decoded[6:])
     else:
-        resp = requests.post(url, headers=headers, json=payload, timeout=120)
-        if resp.status_code != 200:
-            print(f"[!] API 错误: {resp.status_code} {resp.text[:500]}")
-            return {"error": resp.status_code, "detail": resp.text[:500]}
-        if resp.headers.get("content-type", "").startswith("text/event-stream"):
-            print(f"[!] API 返回 SSE 错误: {resp.text[:500]}")
-            return {"error": 4001, "detail": resp.text[:500]}
-        return resp.json()
+        result = {"content": "", "events": []}
+        for line in resp.text.split("\n"):
+            if line.startswith("data: "):
+                data = json.loads(line[6:])
+                result["events"].append(data)
+        return result
 
 
 def send_llm_raw_chat(access_token: str, api_host: str, messages: list,
