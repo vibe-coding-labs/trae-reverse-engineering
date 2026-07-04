@@ -101,3 +101,8 @@ data/**/ai-agent-symbols.txt
 Trae-decompressed.dmg
 trae-hfs-partition.img
 __pycache__/
+
+# VitePress
+node_modules/
+docs/.vitepress/dist/
+docs/.vitepress/cache/

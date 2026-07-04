@@ -1,10 +1,13 @@
 {
-  "name": "trae-cli-formatter",
+  "name": "trae-reverse-engineering",
   "version": "1.0.0",
-  "description": "格式化Trae CLI.js文件的工具",
+  "description": "\u683c\u5f0f\u5316Trae CLI.js\u6587\u4ef6\u7684\u5de5\u5177",
   "main": "format-cli.js",
   "scripts": {
-    "format": "node format-cli.js"
+    "format": "node format-cli.js",
+    "docs:dev": "vitepress dev docs",
+    "docs:build": "vitepress build docs",
+    "docs:preview": "vitepress preview docs"
   },
   "dependencies": {
     "@babel/generator": "^7.27.0",
@@ -20,6 +23,8 @@
     "@babel/cli": "^7.27.0",
     "@babel/core": "^7.26.10",
     "@babel/preset-env": "^7.26.9",
-    "prettier": "^3.5.3"
-  }
+    "prettier": "^3.5.3",
+    "vitepress": "^1.6.0"
+  },
+  "private": true
 }
